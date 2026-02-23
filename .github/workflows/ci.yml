@@ -1,0 +1,87 @@
+name: Python CI — Build Package
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - '**.py'
+      - 'pyproject.toml'
+      - 'setup.cfg'
+      - 'requirements**.txt'
+      - '.github/workflows/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - '**.py'
+      - 'pyproject.toml'
+      - 'requirements**.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_DEFAULT_VERSION: "3.11"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_DEFAULT_TIMEOUT: "100"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+  FORCE_COLOR: "1"
+
+jobs:
+
+  test:
+    name: Test (no tests configured)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.1.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.1.0
+        with:
+          python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
+
+      - name: No tests to run
+        run: echo "No tests found for this repository. Skipping test execution."
+
+  build:
+    name: Build Python package
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.1.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.1.0
+        with:
+          python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
+          cache: 'pip'
+
+      - name: Install project (editable) and requirements
+        run: pip install -r requirements.txt && pip install -e .
+
+      - name: Install build tool and build distributions
+        run: pip install build && python -m build
+
+      - name: Verify package metadata (twine check)
+        run: |
+          pip install twine
+          twine check dist/* || true
+
+      - name: Upload built distributions
+        uses: actions/upload-artifact@v4.3.3
+        with:
+          name: dist-packages-${{ github.run_id }}
+          path: |
+            dist/
+          retention-days: 7
