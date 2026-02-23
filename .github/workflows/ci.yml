@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - develop
+    tags:
+      - 'v*.*.*'
     paths:
       - '**.py'
       - 'pyproject.toml'
@@ -19,7 +21,14 @@ on:
       - '**.py'
       - 'pyproject.toml'
       - 'requirements**.txt'
+  schedule:
+    - cron: '0 8 * * 1'
   workflow_dispatch:
+    inputs:
+      publish_to_testpypi:
+        description: 'Publish to TestPyPI instead of PyPI'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,10 +41,98 @@ env:
   PYTHONUNBUFFERED: "1"
   FORCE_COLOR: "1"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' }}
+
 jobs:
 
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.1.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.1.0
+        with:
+          python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
+          cache: 'pip'
+
+      - name: Install project and lint tools
+        run: |
+          python -m pip install --upgrade pip
+          # Install project (editable) and runtime deps for accurate linting
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          pip install -e .
+          pip install "ruff==0.4.4"
+
+      - name: Run ruff
+        run: |
+          ruff check . --output-format=github --statistics
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.1.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.1.0
+        with:
+          python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies and security tools
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          pip install -e .
+          pip install "bandit[toml]==1.7.8" "pip-audit==2.7.3"
+
+      - name: Audit dependencies for CVEs (pip-audit)
+        run: |
+          if [ -f requirements.txt ]; then
+            pip-audit --requirement requirements.txt --format json --output pip-audit-report.json --progress-spinner off
+          else
+            echo "No requirements.txt found; skipping pip-audit"
+          fi
+        continue-on-error: true
+
+      - name: Run Bandit (code security analysis)
+        run: |
+          # Target the package source directory if present
+          TARGETS=""
+          if [ -d "src" ]; then TARGETS="src/"; fi
+          if [ -d "app" ]; then TARGETS="$TARGETS app/"; fi
+          if [ -z "$TARGETS" ]; then
+            echo "No standard source directories found (src/ or app/); running bandit on repo root"
+            bandit -r . --severity-level medium --confidence-level medium --exclude .venv,tests/ --format json --output bandit-report.json
+          else
+            bandit -r $TARGETS --severity-level medium --confidence-level medium --exclude .venv,tests/ --format json --output bandit-report.json
+          fi
+        continue-on-error: true
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4.3.3
+        with:
+          name: security-reports-${{ github.run_id }}
+          path: |
+            bandit-report.json
+            pip-audit-report.json
+          retention-days: 30
+
   test:
-    name: Test (no tests configured)
+    name: Test (skipped - repository has no tests)
     runs-on: ubuntu-latest
 
     steps:
@@ -47,13 +144,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
 
-      - name: No tests to run
-        run: echo "No tests found for this repository. Skipping test execution."
+      - name: Note - no tests to run
+        run: echo "No tests detected in this repository. Skipping test execution."
 
   build:
-    name: Build Python package
+    name: Build Package
     runs-on: ubuntu-latest
-    needs: test
+    needs: [lint, security, test]
 
     steps:
       - name: Checkout code
@@ -67,18 +164,26 @@ jobs:
           python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
           cache: 'pip'
 
-      - name: Install project (editable) and requirements
-        run: pip install -r requirements.txt && pip install -e .
+      - name: Install project (editable) and runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Use repository's preferred install command
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          pip install -e .
 
-      - name: Install build tool and build distributions
-        run: pip install build && python -m build
+      - name: Install build tool and build package
+        run: |
+          pip install build
+          python -m build
 
       - name: Verify package metadata (twine check)
         run: |
           pip install twine
           twine check dist/* || true
 
-      - name: Upload built distributions
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4.3.3
         with:
           name: dist-packages-${{ github.run_id }}
