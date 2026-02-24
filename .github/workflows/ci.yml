@@ -1,4 +1,4 @@
-name: Python CI — Build
+name: Build Python Package
 
 on:
   push:
@@ -8,6 +8,7 @@ on:
     paths:
       - '**.py'
       - 'pyproject.toml'
+      - 'setup.py'
       - 'setup.cfg'
       - 'requirements*.txt'
       - '.github/workflows/**'
@@ -18,64 +19,64 @@ on:
     paths:
       - '**.py'
       - 'pyproject.toml'
+      - 'setup.py'
       - 'requirements*.txt'
   schedule:
-    - cron: '0 8 * * 1'  # Weekly on Monday 08:00 UTC
-  workflow_dispatch: {}  # Manual trigger
+    - cron: '0 8 * * 1' # weekly on Monday 08:00 UTC
+  workflow_dispatch: {}
 
 permissions:
   contents: read
 
 env:
-  PYTHON_DEFAULT_VERSION: "3.11"
+  PYTHON_VERSION: "3.11"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
-  PYTHONDONTWRITEBYTECODE: "1"
   PYTHONUNBUFFERED: "1"
 
 jobs:
   build:
-    name: Build package (ubuntu-latest, Python ${{ env.PYTHON_DEFAULT_VERSION }})
+    name: Build (ubuntu-latest, Python ${{ env.PYTHON_VERSION }})
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4.1.1
 
-      - name: Set up Python ${{ env.PYTHON_DEFAULT_VERSION }}
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5.1.0
         with:
-          python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
 
       - name: Cache pip
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ env.PYTHON_VERSION }}-${{ hashFiles('**/requirements*.txt', 'pyproject.toml', 'setup.py') }}
           restore-keys: |
-            ${{ runner.os }}-pip-
+            ${{ runner.os }}-pip-${{ env.PYTHON_VERSION }}-
 
-      - name: Install project dependencies and editable package
+      - name: Install project dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
-          # Install the package in editable mode for local imports (as specified)
-          pip install -e .
+          # editable install so tests / local imports work as expected
+          if [ -f setup.py ] || [ -f pyproject.toml ]; then
+            pip install -e .
+          fi
 
       - name: Install build tool
-        run: python -m pip install --upgrade build
+        run: pip install build
 
       - name: Build wheel and sdist
         run: python -m build
-        # Produces artifacts in dist/
 
       - name: List built artifacts
         run: ls -al dist || true
 
-      - name: Upload built artifacts
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4.3.3
         with:
           name: dist-packages-${{ github.run_id }}
