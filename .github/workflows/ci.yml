@@ -13,6 +13,7 @@ on:
       - 'setup.cfg'
       - 'requirements**.txt'
       - '.github/workflows/**'
+      - 'Dockerfile'
   pull_request:
     branches:
       - main
@@ -79,10 +80,10 @@ jobs:
           python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
           cache: 'pip'
 
-      - name: Install project and linting tools
+      - name: Install linting tools
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt && pip install -e .
+          pip install -r requirements.txt
           pip install "ruff==0.4.4" "mypy==1.10.0" "pre-commit==3.7.1"
 
       - name: Run ruff lint
@@ -117,10 +118,10 @@ jobs:
           python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
           cache: 'pip'
 
-      - name: Install project and security tools
+      - name: Install security tools
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt && pip install -e .
+          pip install --upgrade pip
+          pip install -r requirements.txt
           pip install "bandit[toml]==1.7.8" "pip-audit==2.7.3"
 
       - name: Audit dependencies for CVEs (pip-audit)
@@ -139,7 +140,7 @@ jobs:
       - name: Run Bandit (code security analysis)
         id: bandit
         run: |
-          bandit -r src/ \
+          bandit -r src/ app/ \
             --severity-level medium \
             --confidence-level medium \
             --exclude .venv,tests/ \
@@ -176,35 +177,24 @@ jobs:
           retention-days: 30
 
   test:
-    name: Test (no tests configured)
-    runs-on: ubuntu-latest
+    name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     needs: [lint, security]
 
     strategy:
       fail-fast: false
       matrix:
         python-version:
+          - "3.9"
+          - "3.10"
           - "3.11"
+          - "3.12"
         os:
           - ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4.1.1
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5.1.0
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: 'pip'
-
-      - name: Install project (no tests to run)
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt && pip install -e .
-
-      - name: No tests configured
-        run: echo "No test suite found in this repository. Skipping pytest."
+      - name: No tests to run
+        run: echo "No tests defined for this repository. Skipping test steps."
 
   build:
     name: Build Package
@@ -223,14 +213,14 @@ jobs:
           python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
           cache: 'pip'
 
-      - name: Install project and build tools
+      - name: Install project dependencies (editable) and build tools
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt && pip install -e .
-          pip install build twine cyclonedx-bom
+          pip install "build==1.2.1" "twine==5.1.0" "cyclonedx-bom==4.4.3"
 
       - name: Build wheel and source distribution
-        run: pip install build && python -m build
+        run: python -m build
 
       - name: Verify package metadata (twine check)
         run: twine check dist/*
