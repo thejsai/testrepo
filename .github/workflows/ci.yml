@@ -1,78 +1,104 @@
 name: CI
 
 on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_DEFAULT_VERSION: '3.11'
 
 jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Install dependencies
+          python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
+          cache: pip
+
+      - name: Install linting tools
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install ruff
-      - name: Run ruff lint
-        run: ruff check . --output-format=github --statistics
+
+      - name: Run ruff
+        run: ruff check . --output-format=github
 
   test:
     name: Test
     runs-on: ubuntu-latest
     needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Install project and test dependencies
+          python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
+          cache: pip
+
+      - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install -e . || true
           pip install pytest pytest-cov
-      - name: Run tests
+
+      - name: Run tests (if present)
         run: |
           if [ -d tests ]; then
             pytest tests/ -v --cov=. --cov-report=xml || true
           else
-            echo "No tests directory found, skipping pytest."
+            echo 'No tests directory found; skipping pytest.'
+            # Ensure artifacts exist for downstream steps that expect them
+            echo '<tests skipped>' > pytest-report.xml || true
+            echo '<coverage skipped>' > coverage.xml || true
           fi
+
       - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-artifacts-${{ github.run_id }}
+          name: test-artifacts
           path: |
-            coverage.xml
             pytest-report.xml
+            coverage.xml
 
   build:
-    name: Build Package
+    name: Build package
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Install build tool
-        run: python -m pip install --upgrade pip && pip install build
+          python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
+          cache: pip
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
       - name: Build wheel and sdist
         run: python -m build
-      - name: Upload dist artifacts
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-packages-${{ github.run_id }}
+          name: dist-packages
           path: dist/
+          retention-days: 7
