@@ -8,77 +8,198 @@ permissions:
 
 env:
   PYTHON_DEFAULT_VERSION: '3.11'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PIP_DEFAULT_TIMEOUT: '100'
+  PYTHONDONTWRITEBYTECODE: '1'
+  PYTHONUNBUFFERED: '1'
+  FORCE_COLOR: '1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' }}
 
 jobs:
-  lint:
-    name: Lint
+  pre-commit:
+    name: Pre-commit Hooks
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
-          cache: pip
+
+      - name: Run pre-commit on all files
+        uses: pre-commit/action@v3.0.1
+        env:
+          SKIP: no-commit-to-branch
+
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
+          cache: 'pip'
 
       - name: Install linting tools
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install ruff
+          pip install 'ruff==0.4.4' 'mypy==1.10.0' 'pre-commit==3.7.1'
 
-      - name: Run ruff
-        run: ruff check . --output-format=github
+      - name: Run ruff lint
+        run: ruff check . --output-format=github --statistics
 
-  test:
-    name: Test
+      - name: Run ruff format check
+        run: ruff format --check --diff .
+
+      - name: Run mypy type checking
+        run: |
+          if [ -d src ]; then
+            mypy src/ --ignore-missing-imports --warn-return-any --warn-unused-ignores --show-error-codes
+          else
+            echo 'No src/ directory; skipping mypy'
+          fi
+        continue-on-error: true
+
+  security:
+    name: Security Scan
     runs-on: ubuntu-latest
-    needs: lint
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
-          cache: pip
+          cache: 'pip'
 
-      - name: Install test dependencies
+      - name: Install security tools
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install pytest pytest-cov
+          pip install 'bandit[toml]==1.7.8' 'pip-audit==2.7.3'
+
+      - name: Audit dependencies for CVEs (pip-audit)
+        run: |
+          if [ -f requirements.txt ]; then
+            pip-audit --requirement requirements.txt --format json --output pip-audit-report.json --progress-spinner off || true
+          else
+            echo '{}'> pip-audit-report.json
+            echo 'No requirements.txt; skipping pip-audit'
+          fi
+        continue-on-error: true
+
+      - name: Run Bandit (code security analysis)
+        run: |
+          if [ -d src ] || [ -d app ]; then
+            bandit -r src/ app/ --severity-level medium --confidence-level medium --exclude .venv,tests/ --format json --output bandit-report.json || true
+          else
+            echo '{}'> bandit-report.json
+            echo 'No src/ or app/ directory; skipping Bandit'
+          fi
+        continue-on-error: true
+
+      - name: Print Bandit findings
+        if: always()
+        run: |
+          python - <<'PY'
+import json,sys
+try:
+    data=json.load(open('bandit-report.json'))
+    issues=data.get('results',[])
+    if not issues:
+        print('✅ No Bandit findings')
+    else:
+        for i in issues:
+            print(f"[{i.get('issue_severity')}] {i.get('filename')}:{i.get('line_number')} — {i.get('issue_text')}")
+    if any(i.get('issue_severity')=='HIGH' for i in issues):
+        sys.exit(1)
+except FileNotFoundError:
+    print('No bandit report generated')
+PY
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports-${{ github.run_id }}
+          path: |
+            bandit-report.json
+            pip-audit-report.json
+          retention-days: 30
+
+  test:
+    name: Test Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    needs: [lint, security]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+        os: ['ubuntu-latest']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo 'No requirements file found'
+          fi
+          pip install 'pytest==8.2.0' 'pytest-cov==5.0.0' 'pytest-xdist==3.5.0' 'pytest-timeout==2.3.1' 'pytest-rerunfailures==14.0'
 
       - name: Run tests (if present)
         run: |
           if [ -d tests ]; then
-            pytest tests/ -v --cov=. --cov-report=xml || true
+            pytest tests/ -v -n auto --timeout=60 --cov=src --cov-report=xml:coverage.xml --cov-report=term-missing --tb=short --junitxml=pytest-report.xml --reruns 2 --reruns-delay 1
           else
-            echo 'No tests directory found; skipping pytest.'
-            # Ensure artifacts exist for downstream steps that expect them
-            echo '<tests skipped>' > pytest-report.xml || true
-            echo '<coverage skipped>' > coverage.xml || true
+            echo 'No tests directory found; skipping tests'
+            # create placeholder files so upload-artifact steps don't fail
+            echo "<?xml version='1.0'?><testsuites></testsuites>" > pytest-report.xml
+            echo "<?xml version='1.0'?><coverage></coverage>" > coverage.xml
           fi
+        env:
+          APP_ENV: testing
 
-      - name: Upload test artifacts
+      - name: Upload coverage artifact
+        if: always() && matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ github.run_id }}
+          path: coverage.xml
+          retention-days: 7
+
+      - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-artifacts
-          path: |
-            pytest-report.xml
-            coverage.xml
+          name: pytest-results-${{ matrix.python-version }}-${{ matrix.os }}
+          path: pytest-report.xml
+          retention-days: 7
 
   build:
-    name: Build package
+    name: Build Package
     runs-on: ubuntu-latest
-    needs: test
+    needs: [lint, test, security]
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -86,19 +207,75 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_DEFAULT_VERSION }}
-          cache: pip
+          cache: 'pip'
 
       - name: Install build tools
-        run: |
-          python -m pip install --upgrade pip
-          pip install build
+        run: pip install 'build==1.2.1' 'twine==5.1.0' 'cyclonedx-bom==4.4.3'
 
-      - name: Build wheel and sdist
+      - name: Build wheel and source distribution
         run: python -m build
+
+      - name: Verify package metadata (twine check)
+        run: twine check dist/*
+
+      - name: Generate SBOM (Software Bill of Materials)
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          cyclonedx-py environment --output-format json --output-file sbom.json || true
+          echo 'SBOM generated'
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-packages
-          path: dist/
+          name: dist-packages-${{ github.run_id }}
+          path: |
+            dist/
+            sbom.json
           retention-days: 7
+
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-packages-${{ github.run_id }}
+          path: dist/
+
+      - name: Publish to PyPI
+        if: github.event_name == 'push'
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-packages-${{ github.run_id }}
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2.0.5
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/sbom.json
+          generate_release_notes: true
+          make_latest: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}
